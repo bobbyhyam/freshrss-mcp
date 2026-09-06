@@ -5,11 +5,12 @@ import {
   type CallToolResult,
 } from '@modelcontextprotocol/client';
 import { ConfirmationStore } from 'mcp-approval';
+import { connect as netConnect } from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { parseTransport } from '../src/config.js';
-import { createServer, type SharedApprovalState } from '../src/server.js';
+import { createServer, type SharedServerState } from '../src/server.js';
 import {
   HEALTH_PATH,
   MCP_PATH,
@@ -17,7 +18,13 @@ import {
   type HttpHandle,
 } from '../src/http.js';
 import { ALL_TOOLS } from '../src/tools/catalogue.js';
-import { stubFreshRss, testConfig, tokenOf } from './harness.js';
+import {
+  stubFreshRss,
+  testConfig,
+  tokenOf,
+  type FetchStub,
+  type Routes,
+} from './harness.js';
 
 /**
  * The fork's own suite: everything else in test/ is upstream's and stays that
@@ -33,8 +40,38 @@ async function serve(): Promise<string> {
   return `http://127.0.0.1:${handle.port}`;
 }
 
+/**
+ * `stubFreshRss`, with the listener under test exempted.
+ *
+ * The upstream stub replaces the global fetch and fails any path it has no
+ * route for — which over HTTP would be the MCP client's own requests to
+ * 127.0.0.1. They go to the real fetch instead; everything else is FreshRSS
+ * and is stubbed exactly as it is everywhere else in this suite.
+ */
+function stubFreshRssBesideTheListener(routes: Routes = {}): FetchStub {
+  const real = globalThis.fetch.bind(globalThis);
+  const stub = stubFreshRss(routes);
+  const stubbed = stub.spy.getMockImplementation() as typeof fetch;
+  stub.spy.mockImplementation(((input: Parameters<typeof fetch>[0], init) =>
+    String(input).startsWith('http://127.0.0.1:')
+      ? real(input, init)
+      : stubbed(input, init)) as typeof fetch);
+  return stub;
+}
+
+/** Writes a raw request the HTTP clients here cannot express, returns the status line. */
+function rawRequest(port: number, raw: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = netConnect(port, '127.0.0.1', () => socket.write(raw));
+    let received = '';
+    socket.on('data', (chunk) => (received += String(chunk)));
+    socket.on('error', reject);
+    socket.on('close', () => resolve(received.split('\r\n')[0] ?? ''));
+  });
+}
+
 /** A client on one in-process instance built from `shared`. */
-async function linked(shared: SharedApprovalState): Promise<Client> {
+async function linked(shared: SharedServerState): Promise<Client> {
   const server = createServer(testConfig(), shared);
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
@@ -164,6 +201,126 @@ describe('streamable HTTP entry point', () => {
     expect(rejected.isError).toBe(true);
 
     for (const client of [first, second, stranger]) await client.close();
+  });
+
+  it('logs in to FreshRSS once across requests, not once per request', async () => {
+    // `AuthSession` caches the GoogleLogin token to save a login per call. It
+    // lives on the api client, so an api client built per instance would be an
+    // api client built per request, and the saving would be gone.
+    const stub = stubFreshRssBesideTheListener({
+      '/subscription/list': '{}',
+      '/unread-count': '{}',
+    });
+    const base = await serve();
+    const client = new Client({ name: 'test', version: '0.0.0' });
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL(`${base}${MCP_PATH}`))
+    );
+
+    await client.callTool({ name: 'list_feeds', arguments: {} });
+    await client.callTool({ name: 'list_feeds', arguments: {} });
+    await client.close();
+
+    expect(stub.readerCalls.length).toBeGreaterThan(1);
+    expect(
+      stub.calls.filter((call) => call.url.includes('/accounts/ClientLogin'))
+    ).toHaveLength(1);
+  });
+
+  it('completes an elicitation round trip across two requests', async () => {
+    // The 2026-07-28 era has no server→client request channel: the server
+    // answers `input_required`, the SDK client fulfils it from its own
+    // handler, and retries the call on a fresh request id — a second HTTP
+    // request, served by a second instance — echoing the sealed request state.
+    // Verifying that echo needs the key from the first instance, which is what
+    // the listener's shared state provides.
+    const stub = stubFreshRssBesideTheListener({ '/mark-all-as-read': 'OK' });
+    const base = await serve();
+    const prompts: string[] = [];
+    const client = new Client(
+      { name: 'test', version: '0.0.0' },
+      // `mode: 'auto'` because the SDK client's default is `'legacy'`: without
+      // it this client negotiates 2025-11-25 and takes the branch the next
+      // test covers.
+      {
+        capabilities: { elicitation: {} },
+        versionNegotiation: { mode: 'auto' },
+      }
+    );
+    client.setRequestHandler('elicitation/create', (request) => {
+      prompts.push((request.params as { message?: string }).message ?? '');
+      return { action: 'accept', content: { confirm: true } };
+    });
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL(`${base}${MCP_PATH}`))
+    );
+
+    const result = (await client.callTool({
+      name: 'mark_all_as_read',
+      arguments: { feed_id: 12 },
+    })) as CallToolResult;
+
+    // Asked once, and the call went through on the answer rather than handing
+    // back a token the model would have had to quote.
+    expect(prompts).toHaveLength(1);
+    expect(result.isError).toBeFalsy();
+    expect(stub.readerCalls).toHaveLength(1);
+    await client.close();
+  });
+
+  it('falls back to the two-call token for a 2025-era client', async () => {
+    // The other half of the elicitation story, and the reason it is not a
+    // regression. A client that negotiates 2025-11-25 is served by the
+    // entry's stateless legacy leg, where an instance lives for one POST and
+    // cannot be asked anything — `canAsk` reads capabilities off the modern
+    // envelope, which 2025 traffic does not carry. mcp-approval answers that
+    // with the two-call token rather than acting unannounced, and the token
+    // crosses requests because the store is the listener's.
+    const stub = stubFreshRssBesideTheListener({ '/mark-all-as-read': 'OK' });
+    const base = await serve();
+    const prompts: string[] = [];
+    const client = new Client(
+      { name: 'test', version: '0.0.0' },
+      { capabilities: { elicitation: {} } }
+    );
+    client.setRequestHandler('elicitation/create', () => {
+      prompts.push('asked');
+      return { action: 'accept', content: { confirm: true } };
+    });
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL(`${base}${MCP_PATH}`))
+    );
+
+    const args = { feed_id: 12 };
+    const issued = (await client.callTool({
+      name: 'mark_all_as_read',
+      arguments: args,
+    })) as CallToolResult;
+    expect(prompts).toHaveLength(0);
+    expect(stub.calls).toHaveLength(0);
+
+    const done = (await client.callTool({
+      name: 'mark_all_as_read',
+      arguments: { ...args, confirm_token: tokenOf(issued) },
+    })) as CallToolResult;
+    expect(done.isError).toBeFalsy();
+    expect(stub.readerCalls).toHaveLength(1);
+    await client.close();
+  });
+
+  it('answers a request target the URL parser rejects with 400', async () => {
+    // `GET //[` parses in Node's HTTP layer and throws in `new URL`. Unguarded
+    // that is an uncaught exception in the request listener, which ends the
+    // process — so the assertion that matters is the second one.
+    const base = await serve();
+    const status = await rawRequest(
+      Number(new URL(base).port),
+      'GET //[ HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n'
+    );
+    expect(status).toContain('400');
+
+    const after = await fetch(`${base}${HEALTH_PATH}`);
+    expect(after.status).toBe(200);
   });
 
   it('rejects a port already in use rather than resolving', async () => {

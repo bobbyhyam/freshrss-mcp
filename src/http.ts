@@ -12,6 +12,7 @@ import {
 } from '@modelcontextprotocol/node';
 import { ConfirmationStore } from 'mcp-approval';
 
+import { FreshRssApi } from './api.js';
 import type { Config } from './config.js';
 import { createServer } from './server.js';
 
@@ -48,12 +49,20 @@ export interface HttpHandle {
  * Serves the MCP endpoint over streamable HTTP and resolves once it is
  * listening.
  *
- * One `createServer(config)` per request, which is what `createMcpHandler`
- * asks its factory for and the same contract `serveStdio` has per connection:
- * no instance is ever shared between two callers. What the listener does hold
- * is the flow state a guarded write needs across its two halves — see
- * {@link SharedApprovalState} — because over HTTP those two halves are two
- * requests, and under stdio they were two calls on one connection.
+ * One `createServer(config)` per request. That is not a choice this file
+ * makes: `createMcpHandler` calls its factory once per message it serves
+ * (`serveModern` in the SDK's `createMcpHandler.ts`, and again per POST on the
+ * stateless legacy leg), and the SDK has no session-keyed mode to opt into —
+ * `McpServer` itself calls this "the per-request-factory `createMcpHandler`
+ * model". The entry re-seeds each fresh instance from the request's own `_meta`
+ * envelope: `setNegotiatedProtocolVersion` for the era, and
+ * `seedClientIdentityFromEnvelope` for the client info and capabilities, whose
+ * doc says in as many words that this keeps those accessors answering "on
+ * instances that never see an `initialize` handshake".
+ *
+ * So what a per-request instance must not hold is anything the server accrues
+ * for itself across calls — see {@link SharedServerState} for the two things
+ * this server has, both built once here and handed to every instance.
  */
 export async function serveHttp(
   config: Config,
@@ -63,6 +72,7 @@ export async function serveHttp(
   const port = options.port ?? DEFAULT_HTTP_PORT;
 
   const shared = {
+    api: new FreshRssApi(config),
     confirmations: new ConfirmationStore(),
     approvalKey: randomBytes(32),
   };
@@ -80,7 +90,19 @@ export async function serveHttp(
     (req: IncomingMessage, res: ServerResponse) => {
       // The path only; a query string is not part of the routing decision, and
       // the base is a placeholder because a Node request URL is always relative.
-      const path = new URL(req.url ?? '/', 'http://localhost').pathname;
+      let path: string;
+      try {
+        path = new URL(req.url ?? '/', 'http://localhost').pathname;
+      } catch {
+        // Node's HTTP parser accepts request targets the URL parser refuses:
+        // `GET //[ HTTP/1.1` resolves as protocol-relative against the base and
+        // `[` is not a host. Thrown from a 'request' listener that is an
+        // uncaught exception, so leaving it unguarded hands anyone who can open
+        // a socket a one-line way to kill the process.
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end('{"error":"bad request target"}\n');
+        return;
+      }
 
       if (path === HEALTH_PATH) {
         // Liveness, and only that: it answers as soon as the listener is up and
@@ -97,7 +119,18 @@ export async function serveHttp(
         // `exactOptionalPropertyTypes` that is not the same type as Node's own
         // `string | undefined`. Same values, different declaration; the cast is
         // the whole of the difference.
-        void mcp(req as unknown as NodeIncomingMessageLike, res);
+        // The adapter answers its own failures with a 500, but the write of
+        // that response is outside its try — a rejection here would be an
+        // unhandled one, which Node ends the process for. Same reason as the
+        // parse guard above: nothing a request can do may take the listener
+        // down.
+        void mcp(req as unknown as NodeIncomingMessageLike, res).catch(
+          (error: unknown) => {
+            onerror(error instanceof Error ? error : new Error(String(error)));
+            if (!res.headersSent) res.writeHead(500);
+            res.end();
+          }
+        );
         return;
       }
 
