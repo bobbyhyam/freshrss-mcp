@@ -13,6 +13,12 @@ permissions:
 
 jobs:
   mcp-registry:
+    # Fork: disabled by a guard rather than by deleting the file, so an upstream
+    # edit to this workflow merges instead of conflicting with a deletion. The
+    # registry entry names `io.github.ni-c/freshrss-mcp` and belongs to
+    # upstream; a manual dispatch here is a no-op instead of an attempt to
+    # publish over it.
+    if: github.repository == 'ni-c/freshrss-mcp'
     runs-on: ubuntu-latest
     permissions:
       contents: read

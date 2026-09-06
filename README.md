@@ -1,5 +1,32 @@
 # freshrss-mcp
 
+> ## This is a fork
+>
+> Upstream is [ni-c/freshrss-mcp](https://github.com/ni-c/freshrss-mcp), and
+> everything below this box is upstream's README. This fork's `main` is
+> upstream's `main` plus one change and stays a superset of it: releases come in
+> by merging the upstream tag, never by rebasing.
+>
+> **The divergence is a second serving entry.** `FRESHRSS_TRANSPORT=http` binds
+> streamable HTTP on `0.0.0.0:8080`, with the MCP endpoint at `/mcp` and a
+> liveness probe at `/health`. It exists because the
+> [agentgateway](https://github.com/agentgateway/agentgateway) container in
+> front of it is distroless and cannot spawn a stdio child, so anything behind
+> it has to speak HTTP itself. Upstream
+> [declined a native transport by design](https://github.com/ni-c/freshrss-mcp/issues/23):
+> their servers are thin stdio processes and transport lives in their hub, so
+> the patch lives here rather than in a pull request.
+>
+> Unset, or set to anything else, `FRESHRSS_TRANSPORT` leaves the server on
+> stdio and every `npx` invocation documented below is unchanged. The one place
+> the default differs is our container image, which sets it to `http` because
+> that is the only reason the image is built.
+>
+> **Tags are `v<upstream>-bh.N`.** `v0.3.0-bh.1` is upstream 0.3.0 carrying the
+> first revision of our patch, and it builds `ghcr.io/bobbyhyam/freshrss-mcp`.
+> Nothing here is published to npm or to the MCP Registry: `@ni-c/freshrss-mcp`
+> and the registry entry stay upstream's alone.
+
 [![CI](https://img.shields.io/github/actions/workflow/status/ni-c/freshrss-mcp/ci.yml?branch=main&label=CI)](https://github.com/ni-c/freshrss-mcp/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/%40ni-c%2Ffreshrss-mcp)](https://www.npmjs.com/package/@ni-c/freshrss-mcp)
 [![npm downloads](https://img.shields.io/npm/dm/%40ni-c%2Ffreshrss-mcp)](https://www.npmjs.com/package/@ni-c/freshrss-mcp)

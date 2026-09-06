@@ -28,7 +28,47 @@ function packageVersion(): string {
   }
 }
 
-export function createServer(config: Config): McpServer {
+/**
+ * What a server instance accrues for itself across calls — the fork's only
+ * change to this file, and it changes nothing for a caller that omits it.
+ *
+ * Under stdio the process is the connection: one instance serves it start to
+ * finish, so everything built below lives exactly as long as it should. Over
+ * streamable HTTP an instance serves one request, because that is the only
+ * model `createMcpHandler` has, so anything here that stayed per-instance
+ * would be rebuilt from nothing on every call. The HTTP entry point builds
+ * these once per listener and passes them to every instance.
+ *
+ * Three items, and this list is the whole of it — everything else an instance
+ * holds is either derived from `config` (the tool filter, the registrations)
+ * or re-seeded per request by the SDK entry (the negotiated protocol version,
+ * the client info and capabilities).
+ */
+export interface SharedServerState {
+  /**
+   * Holds the cached GoogleLogin auth token and the write token. Per instance
+   * it would mean a fresh `ClientLogin` on every single tool call, which is
+   * both a round trip this server exists to avoid and a login storm pointed at
+   * FreshRSS.
+   */
+  api?: FreshRssApi;
+  /** The two-call confirmation tokens, whose two calls are two requests here. */
+  confirmations?: ConfirmationStore;
+  /**
+   * HMAC key sealing the approval state; see `createApproval`'s `key`, which
+   * defaults to 32 bytes random per process and says to supply your own when
+   * more than one instance may serve the two halves of the same flow. On the
+   * 2026-07-28 era an elicitation answer comes back on a *new* request with a
+   * byte-exact echo of that sealed state, so this is what makes elicitation
+   * round-trip at all over HTTP.
+   */
+  approvalKey?: Uint8Array;
+}
+
+export function createServer(
+  config: Config,
+  shared: SharedServerState = {}
+): McpServer {
   // Before anything is built: an unusable tool list should fail on the
   // way in, not leave a server running with tools quietly missing.
   const filter = buildToolFilter({
@@ -51,13 +91,14 @@ export function createServer(config: Config): McpServer {
     },
   });
 
-  const api = new FreshRssApi(config);
-  const confirmations = new ConfirmationStore();
+  const api = shared.api ?? new FreshRssApi(config);
+  const confirmations = shared.confirmations ?? new ConfirmationStore();
   // One approver per server: it holds the key that seals the request state
   // carried out through the client and back.
   const approval = createApproval({
     server: 'freshrss-mcp',
     elicitation: config.elicitation,
+    ...(shared.approvalKey === undefined ? {} : { key: shared.approvalKey }),
   });
 
   const server = new McpServer({

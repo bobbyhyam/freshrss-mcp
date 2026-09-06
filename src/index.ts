@@ -2,7 +2,7 @@
 import type { McpServer } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 
-import { loadConfig } from './config.js';
+import { loadConfig, parseTransport } from './config.js';
 import { createServer } from './server.js';
 import { ToolFilterError } from 'mcp-tool-allowlist';
 
@@ -44,6 +44,28 @@ async function main(): Promise<void> {
     }
     throw error;
   }
+  // Fork addition. The branch sits here rather than higher up so that a bad
+  // tool list still ends the process before either transport binds anything,
+  // and the import is dynamic so an `npx` stdio run never loads the HTTP
+  // module or the Node adapter behind it.
+  if (parseTransport(process.env.FRESHRSS_TRANSPORT) === 'http') {
+    const { serveHttp, DEFAULT_HTTP_HOST, MCP_PATH } =
+      await import('./http.js');
+    const handle = await serveHttp(config);
+    console.error(
+      `freshrss-mcp: FRESHRSS_TRANSPORT=http — listening on ${DEFAULT_HTTP_HOST}:${handle.port}${MCP_PATH}`
+    );
+    // `pending` is discarded: over HTTP an instance serves one request and the
+    // handler builds its own from the same factory.
+    pending = undefined;
+    console.error(
+      config.url
+        ? `freshrss-mcp: targeting ${config.url}`
+        : 'freshrss-mcp: started without configuration — tools are listed but every call will fail'
+    );
+    return;
+  }
+
   // stdout belongs to the protocol; everything human-readable goes to stderr.
   // `serveStdio` owns the era decision for the connection: the opening
   // exchange selects 2025-11-25 or 2026-07-28 and pins one instance from
