@@ -52,8 +52,23 @@ LABEL io.modelcontextprotocol.server.name="io.github.ni-c/freshrss-mcp"
 # Drop root: the node image ships an unprivileged `node` user (uid 1000).
 USER node
 
-# stdio transport only — no port, no healthcheck, and no child processes, so no
-# init process is needed. The server starts without credentials (tools stay
-# listable so registries and sandbox inspectors can introspect it); every call
-# then fails with setup instructions instead of reaching the API.
+# Fork: this image serves streamable HTTP, because the agentgateway container in
+# front of it is distroless and cannot spawn a stdio child. The npm package and
+# every `npx` run are unaffected — the default is still stdio, and this line is
+# the whole of the difference. Override it with `-e FRESHRSS_TRANSPORT=stdio`
+# to run the image the way upstream's runs.
+ENV FRESHRSS_TRANSPORT=http
+EXPOSE 8080
+
+# `node -e` rather than curl or wget: the runtime stage deletes npm and carries
+# no HTTP client this healthcheck can rely on, and node is already the
+# entrypoint. Liveness only — /health says the listener is up and deliberately
+# says nothing about FreshRSS.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:8080/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+
+# No child processes, so no init process is needed. The server starts without
+# credentials (tools stay listable so registries and sandbox inspectors can
+# introspect it); every call then fails with setup instructions instead of
+# reaching the API.
 ENTRYPOINT ["node", "dist/index.js"]

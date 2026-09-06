@@ -27,7 +27,13 @@ permissions:
 
 jobs:
   auto-merge:
-    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    # Fork: disabled by a guard rather than by deleting the file, so an upstream
+    # edit to this workflow merges instead of conflicting with a deletion. The
+    # header above is the reason it must not run here — the fork's `main` has no
+    # required checks, so `--auto` would merge a bump before a test had run.
+    if: >-
+      github.repository == 'ni-c/freshrss-mcp' &&
+      github.event.pull_request.user.login == 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions:
       contents: write

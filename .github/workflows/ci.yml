@@ -206,7 +206,11 @@ jobs:
       - id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/ni-c/freshrss-mcp
+          # Fork: the namespace follows the repository instead of naming one.
+          # Hardcoded, this job aimed our builds at upstream's package and went
+          # red on every push; written this way it is also a line upstream could
+          # keep, so the next tag merge has nothing to resolve here.
+          images: ghcr.io/${{ github.repository }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha

@@ -84,6 +84,29 @@ export function parseElicitation(raw: string | undefined): boolean {
 }
 
 /**
+ * Which serving entry the process starts, from `FRESHRSS_TRANSPORT`.
+ *
+ * Fork addition, and the only one in this file. `http` binds the streamable
+ * HTTP endpoint (see `src/http.ts`); anything else, unset included, is stdio,
+ * so the npm behaviour and every `npx` invocation are untouched.
+ *
+ * Tolerant in the same direction as `FRESHRSS_READ_ONLY`: a value the operator
+ * did not spell exactly leaves the default in place rather than refusing to
+ * start. A container that meant to serve HTTP then fails its own healthcheck
+ * within seconds, and the line below is what makes that a sentence rather than
+ * a mystery.
+ */
+export function parseTransport(raw: string | undefined): 'stdio' | 'http' {
+  const value = raw?.trim().toLowerCase();
+  if (value === undefined || value === '' || value === 'stdio') return 'stdio';
+  if (value === 'http') return 'http';
+  console.error(
+    `freshrss-mcp: FRESHRSS_TRANSPORT must be "stdio" or "http" — got "${raw}". Serving stdio.`
+  );
+  return 'stdio';
+}
+
+/**
  * Reads a switch that turns a protection *on*, and reads it tolerantly.
  *
  * `FRESHRSS_READ_ONLY=1` in a Docker Compose file, `=yes` from a shell script,

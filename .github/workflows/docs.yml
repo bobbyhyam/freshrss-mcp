@@ -32,6 +32,11 @@ permissions:
 
 jobs:
   build-deploy:
+    # Fork: disabled by a guard rather than by deleting the file, so an upstream
+    # edit to this workflow merges instead of conflicting with a deletion. The
+    # fork publishes no documentation site and owns no Pages domain, so this
+    # would force-push a gh-pages branch nothing serves.
+    if: github.repository == 'ni-c/freshrss-mcp'
     runs-on: ubuntu-latest
     permissions:
       # Needed only by the deploy step, which force-pushes the built site.

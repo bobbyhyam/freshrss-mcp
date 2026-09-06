@@ -28,7 +28,27 @@ function packageVersion(): string {
   }
 }
 
-export function createServer(config: Config): McpServer {
+/**
+ * Flow state that has to outlive one served instance — the fork's only change
+ * to this file, and it changes nothing for a caller that omits it.
+ *
+ * Under stdio the process is the flow: one instance serves a whole connection,
+ * so the confirmation store and the seal key built below live exactly as long
+ * as they should. Over streamable HTTP an instance serves one request, so the
+ * two halves of a guarded write are answered by two different instances, and a
+ * per-instance store or key would reject the second half every time. The HTTP
+ * entry point builds both once per listener and passes them in here.
+ */
+export interface SharedApprovalState {
+  confirmations?: ConfirmationStore;
+  /** HMAC key sealing the approval state; see `createApproval`'s `key`. */
+  approvalKey?: Uint8Array;
+}
+
+export function createServer(
+  config: Config,
+  shared: SharedApprovalState = {}
+): McpServer {
   // Before anything is built: an unusable tool list should fail on the
   // way in, not leave a server running with tools quietly missing.
   const filter = buildToolFilter({
@@ -52,12 +72,13 @@ export function createServer(config: Config): McpServer {
   });
 
   const api = new FreshRssApi(config);
-  const confirmations = new ConfirmationStore();
+  const confirmations = shared.confirmations ?? new ConfirmationStore();
   // One approver per server: it holds the key that seals the request state
   // carried out through the client and back.
   const approval = createApproval({
     server: 'freshrss-mcp',
     elicitation: config.elicitation,
+    ...(shared.approvalKey === undefined ? {} : { key: shared.approvalKey }),
   });
 
   const server = new McpServer({
